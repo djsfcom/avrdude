@@ -50,6 +50,7 @@ struct pdata
   unsigned int buffersize;
   unsigned char test_blockmode;
   unsigned char use_blockmode;
+  unsigned char is_x0xb0x;
 };
 
 #define PDATA(pgm) ((struct pdata *)(pgm->cookie))
@@ -177,8 +178,10 @@ static int avr910_initialize(PROGRAMMER * pgm, AVRPART * p)
   avr910_send(pgm, "V", 1);
   avr910_recv(pgm, sw, sizeof(sw));
 
-  avr910_send(pgm, "v", 1);
-  avr910_recv(pgm, hw, sizeof(hw));
+  if (!PDATA(pgm)->is_x0xb0x) {
+      avr910_send(pgm, "v", 1);
+      avr910_recv(pgm, hw, sizeof(hw));
+  }
 
   /* Get the programmer type (serial or parallel). Expect serial. */
 
@@ -187,7 +190,8 @@ static int avr910_initialize(PROGRAMMER * pgm, AVRPART * p)
 
   avrdude_message(MSG_INFO, "Found programmer: Id = \"%s\"; type = %c\n", id, type);
   avrdude_message(MSG_INFO, "    Software Version = %c.%c; ", sw[0], sw[1]);
-  avrdude_message(MSG_INFO, "Hardware Version = %c.%c\n", hw[0], hw[1]);
+  if (!PDATA(pgm)->is_x0xb0x)
+      avrdude_message(MSG_INFO, "Hardware Version = %c.%c\n", hw[0], hw[1]);
 
   /* See if programmer supports autoincrement of address. */
 
@@ -232,13 +236,15 @@ static int avr910_initialize(PROGRAMMER * pgm, AVRPART * p)
 	devtype_1st = c;
       if (c == 0)
 	break;
-      part = locate_part_by_avr910_devcode(part_list, c);
 
-      avrdude_message(MSG_INFO, "    Device code: 0x%02x = %s\n", c, part ?  part->desc : "(unknown)");
+      unsigned char devtype = PDATA(pgm)->is_x0xb0x && c == (signed char)0xA2 ? 0x63 : c;
+      part = locate_part_by_avr910_devcode(part_list, devtype);
+
+      avrdude_message(MSG_INFO, "    Device code: 0x%02x = %s\n", devtype, part ?  part->desc : "(unknown)");
 
       /* FIXME: Need to lookup devcode and report the device. */
 
-      if (p->avr910_devcode == c)
+      if (p->avr910_devcode == devtype)
 	dev_supported = 1;
     };
     avrdude_message(MSG_INFO, "\n");
@@ -349,6 +355,13 @@ static int avr910_parseextparms(PROGRAMMER * pgm, LISTID extparms)
 
       continue;
     }
+    if (!strncmp(extended_param, "x0xb0x", sizeof("x0xb0x") - 1)) {
+      avrdude_message(MSG_NOTICE2, "%s: avr910_parseextparms(-x): x0xb0x bootloader mode\n",
+                      progname);
+      PDATA(pgm)->is_x0xb0x = 1;
+      pgm->cmd = NULL;
+      continue;
+    }
 
     avrdude_message(MSG_INFO, "%s: avr910_parseextparms(): invalid extended parameter '%s'\n",
                     progname, extended_param);
@@ -430,6 +443,11 @@ static int avr910_write_byte(PROGRAMMER * pgm, AVRPART * p, AVRMEM * m,
     cmd[0] = 'D';
   }
   else {
+    if (PDATA(pgm)->is_x0xb0x) {
+      avrdude_message(MSG_INFO, "x0xb0x write: unsupported memory type: %s\n", m->desc);
+      return -1;
+    }
+
     return avr_write_byte_default(pgm, p, m, addr, value);
   }
 
@@ -477,6 +495,12 @@ static int avr910_read_byte_eeprom(PROGRAMMER * pgm, AVRPART * p, AVRMEM * m,
   return 0;
 }
 
+static int x0xb0x_read_fuse(PROGRAMMER *pgm, unsigned char *value, char *cmd) {
+  avr910_send(pgm, cmd, 1);
+  avr910_recv(pgm, (char *)value, 1);
+
+  return 0;
+}
 
 static int avr910_read_byte(PROGRAMMER * pgm, AVRPART * p, AVRMEM * m,
                             unsigned long addr, unsigned char * value)
@@ -487,6 +511,22 @@ static int avr910_read_byte(PROGRAMMER * pgm, AVRPART * p, AVRMEM * m,
 
   if (strcmp(m->desc, "eeprom") == 0) {
     return avr910_read_byte_eeprom(pgm, p, m, addr, value);
+  }
+
+  if (PDATA(pgm)->is_x0xb0x) {
+    if (!strcmp(m->desc, "lfuse"))
+      return x0xb0x_read_fuse(pgm, value, "F");
+
+    if (!strcmp(m->desc, "hfuse"))
+      return x0xb0x_read_fuse(pgm, value, "N");
+
+    if (!strcmp(m->desc, "efuse")) {
+      *value = 0xFF;  /* factory efuse setting for ATmega162 */
+      return 0;
+    }
+
+    avrdude_message(MSG_INFO, "x0xb0x read: unsupported memory type: %s\n", m->desc);
+    return -1;
   }
 
   return avr_read_byte_default(pgm, p, m, addr, value);
