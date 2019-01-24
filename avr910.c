@@ -166,6 +166,9 @@ static int avr910_initialize(PROGRAMMER * pgm, AVRPART * p)
   char c;
   AVRPART * part;
 
+  if (PDATA(pgm)->is_x0xb0x)
+      avr910_send(pgm, "\x1B", 1);
+
   /* Get the programmer identifier. Programmer returns exactly 7 chars
      _without_ the null.*/
 
